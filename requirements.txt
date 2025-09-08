@@ -4,3 +4,6 @@ google-auth
 qrcode
 Pillow
 requests
+streamlit-webrtc
+opencv-python-headless
+av
