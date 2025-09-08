@@ -44,7 +44,7 @@ def get_or_create_ws(title: str, rows=1000, cols=20):
         return sh.add_worksheet(title=title, rows=str(rows), cols=str(cols))
 
 # ========== BASIC SHEET (Sheet1) ==========
-ws_basic = sh.sheet1  # your original sheet (headers: timestamp, user, item, qty, notes)
+ws_basic = sh.sheet1  # original sheet (headers: timestamp, user, item, qty, notes)
 
 @st.cache_data(ttl=30)
 def get_basic_rows():
@@ -349,8 +349,51 @@ with tab1:
 # ---------- TAB 2: Validate / Use ----------
 with tab2:
     st.markdown("Scan a QR (or paste its text) to **consume a use** and update counts.")
-    with st.form("scan_form", clear_on_submit=True):
-        scan_text = st.text_area("Scanned QR text (payload)", placeholder="Paste the decoded QR content here...")
+
+    # --- Webcam scanner (optional) ---
+    st.caption("You can either paste the decoded text below OR turn on the webcam scanner.")
+    use_camera = st.toggle("Use webcam scanner")
+
+    payload_from_camera = st.session_state.get("payload_from_camera", "")
+
+    if use_camera:
+        # Imported inside block so the app still runs even if packages are missing
+        from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+        import av
+        import cv2
+
+        class QRDetector(VideoTransformerBase):
+            def __init__(self):
+                self.detector = cv2.QRCodeDetector()
+
+            def transform(self, frame):
+                img = frame.to_ndarray(format="bgr24")
+                data, points, _ = self.detector.detectAndDecode(img)
+                if data:
+                    if "payload_from_camera" not in st.session_state or not st.session_state["payload_from_camera"]:
+                        st.session_state["payload_from_camera"] = data
+                # draw polygon if detected
+                if points is not None:
+                    pts = points.astype(int).reshape(-1, 2)
+                    for i in range(len(pts)):
+                        cv2.line(img, tuple(pts[i]), tuple(pts[(i + 1) % len(pts)]), (0, 255, 0), 2)
+                return img
+
+        webrtc_streamer(key="qr-cam", video_transformer_factory=QRDetector)
+
+        if payload_from_camera:
+            st.success("QR captured from camera!")
+            st.code(payload_from_camera, language="text")
+
+    # --- Manual/pasted input also supported ---
+    with st.form("scan_form", clear_on_submit=False):
+        default_text = payload_from_camera if payload_from_camera else ""
+        scan_text = st.text_area(
+            "Scanned QR text (payload)",
+            value=default_text,
+            placeholder="Paste the decoded QR content here (or use the webcam scanner above)...",
+            height=120,
+        )
         admin2 = st.text_input("Admin password", type="password")
         use_btn = st.form_submit_button("Validate & Use")
 
@@ -389,6 +432,7 @@ with tab2:
                             update_token_used(token["id"], new_used, new_status)
                             append_use_row(datetime.now().isoformat(timespec="seconds"), token["id"], token["user"], note="scan")
                             st.success("Use recorded ✅")
+                            st.session_state["payload_from_camera"] = ""  # avoid double-submit
                         except Exception as e:
                             st.error(f"Failed to update token: {e}")
 
