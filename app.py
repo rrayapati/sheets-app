@@ -12,7 +12,7 @@ creds = Credentials.from_service_account_info(
 gc = gspread.authorize(creds)
 
 # Open your Google Sheet (replace with your sheet link)
-SHEET_URL = "https://docs.google.com/spreadsheets/d/PUT-YOUR-SHEET-ID-HERE/edit"
+SHEET_URL = st.secrets["sheets"]["url"]
 sh = gc.open_by_url(SHEET_URL)
 ws = sh.sheet1
 
