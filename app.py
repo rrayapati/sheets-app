@@ -36,15 +36,23 @@ gc = gspread.authorize(creds)
 SHEET_URL = st.secrets["sheets"]["url"]
 sh = gc.open_by_url(SHEET_URL)
 
+# ---- Helpers to get/create sheets
 def get_or_create_ws(title: str, rows=1000, cols=20):
     try:
         return sh.worksheet(title)
     except gspread.exceptions.WorksheetNotFound:
         return sh.add_worksheet(title=title, rows=str(rows), cols=str(cols))
 
-# Sheets:
-# 1) tokens: id, user, type, start, end, allowance, used, status, issued_ts, payload
-# 2) uses:   ts, token_id, user_scanned, note
+# ========== BASIC SHEET (Sheet1) ==========
+ws_basic = sh.sheet1  # your original sheet (headers: timestamp, user, item, qty, notes)
+
+@st.cache_data(ttl=30)
+def get_basic_rows():
+    return ws_basic.get_all_records()  # [] if only headers
+
+# ========== TOKEN SHEETS ==========
+# tokens: id, user, type, start, end, allowance, used, status, issued_ts, payload
+# uses:   ts, token_id, user_scanned, note
 ws_tokens = get_or_create_ws("tokens")
 ws_uses   = get_or_create_ws("uses")
 
@@ -56,9 +64,6 @@ def ensure_headers(ws, headers):
 ensure_headers(ws_tokens, ["id","user","type","start","end","allowance","used","status","issued_ts","payload"])
 ensure_headers(ws_uses,   ["ts","token_id","user_scanned","note"])
 
-# -----------------------------
-# Helpers: read/write rows
-# -----------------------------
 @st.cache_data(ttl=20)
 def read_tokens():
     recs = ws_tokens.get_all_records()
@@ -82,7 +87,7 @@ def append_token_row(token):
     st.cache_data.clear()
 
 def update_token_used(token_id, new_used, new_status=None):
-    cells = ws_tokens.findall(token_id, in_column=1)  # Column A = id
+    cells = ws_tokens.findall(token_id, in_column=1)  # col A = id
     if not cells:
         raise ValueError("Token not found")
     row = cells[0].row
@@ -96,10 +101,9 @@ def append_use_row(ts, token_id, user_scanned, note=""):
     st.cache_data.clear()
 
 # -----------------------------
-# Token encoding/decoding
+# Token payload (encoded in QR)
 # -----------------------------
-# Payload format:
-# MTK|id=ABCD1234|user=Rajeswar|type=Lunch|allow=20|start=2025-09-01|end=2025-09-30
+# MTK|id=ABCD1234|user=Name|type=Lunch|allow=20|start=YYYY-MM-DD|end=YYYY-MM-DD
 def make_payload(token):
     return (
         f"MTK|id={token['id']}"
@@ -143,7 +147,7 @@ def within_validity(today_iso: str, start_iso: str, end_iso: str):
         return False
 
 # -----------------------------
-# Email & WhatsApp helpers
+# Email & WhatsApp helpers (optional)
 # -----------------------------
 def send_email_with_png_via_sendgrid(to_email: str, subject: str, body_text: str, png_bytes: bytes, filename: str = "qr.png"):
     key = st.secrets.get("email", {}).get("sendgrid_api_key", "")
@@ -207,15 +211,53 @@ def whatsapp_send_image(phone_e164: str, media_id: str, caption: str = ""):
         return True, "WhatsApp sent"
     return False, f"Send error {resp.status_code}: {resp.text}"
 
-# -----------------------------
-# Tabs
-# -----------------------------
+# =========================================================
+# SECTION 1: Latest entries (basic) + Add an entry (Sheet1)
+# =========================================================
+st.subheader("Latest entries")
+basic_rows = get_basic_rows()
+st.dataframe(basic_rows if basic_rows else [], use_container_width=True)
+if st.button("Refresh table"):
+    st.cache_data.clear()
+    basic_rows = get_basic_rows()
+    st.success("Refreshed!")
+
+st.divider()
+st.subheader("Add an entry")
+
+with st.form("add_entry", clear_on_submit=True):
+    user = st.text_input("User name")
+    item = st.selectbox("Item", ["Breakfast", "Lunch", "Dinner", "Coupon"])
+    qty = st.number_input("Quantity", min_value=1, step=1, value=1)
+    notes = st.text_input("Notes (optional)")
+    admin_pass = st.text_input("Admin pass", type="password")
+    submitted = st.form_submit_button("Submit")
+
+if submitted:
+    expected = st.secrets["sheets"].get("admin_pass", "")
+    if not expected:
+        st.error('Set an admin pass in Secrets under [sheets] admin_pass="..."')
+    elif admin_pass != expected:
+        st.error("Invalid admin pass.")
+    elif not user.strip():
+        st.error("User name is required.")
+    else:
+        ws_basic.append_row([
+            datetime.now().isoformat(timespec="seconds"),
+            user, item, int(qty), notes
+        ])
+        st.cache_data.clear()
+        st.success("Saved! Click “Refresh table” above to see it.")
+
+# =========================================================
+# SECTION 2: Tokens — Generate / Validate / Dashboard
+# =========================================================
+st.divider()
 tab1, tab2, tab3 = st.tabs(["➕ Generate QR (one per period)", "✅ Validate / Use", "📊 Tokens Dashboard"])
 
-# ========== TAB 1: Generate single QR token ==========
+# ---------- TAB 1: Generate QR token ----------
 with tab1:
-    st.markdown("Create **one QR** that covers a period with a set allowance (number of uses).")
-
+    st.markdown("Create **one QR** that covers a date range with a total allowance (number of uses).")
     with st.form("gen_form", clear_on_submit=True):
         g_user = st.text_input("User name")
         g_type = st.selectbox("Type", ["Breakfast", "Lunch", "Dinner", "Coupon"])
@@ -224,9 +266,9 @@ with tab1:
         g_end   = colB.date_input("End date", value=date.today() + timedelta(days=30))
         g_allow = st.number_input("Total allowance (uses)", min_value=1, step=1, value=20)
         g_admin = st.text_input("Admin password", type="password")
-        submitted = st.form_submit_button("Generate QR")
+        submitted_qr = st.form_submit_button("Generate QR")
 
-    if submitted:
+    if submitted_qr:
         if not ADMIN_PASS:
             st.error('Set [sheets] admin_pass="your-pass" in Secrets.')
         elif g_admin != ADMIN_PASS:
@@ -250,14 +292,13 @@ with tab1:
             }
             token["payload"] = make_payload(token)
 
-            # Save token row
             append_token_row(token)
 
-            # Generate QR PNG
             img = qrcode.make(token["payload"])
             buf = BytesIO()
             img.save(buf, format="PNG")
             png_bytes = buf.getvalue()
+
             st.image(png_bytes, caption=f"QR for {token['user']} — {token['type']}", use_column_width=False)
             st.download_button(
                 "Download QR",
@@ -265,13 +306,11 @@ with tab1:
                 file_name=f"{token['user']}_{token['type']}_{token_id}.png",
                 mime="image/png"
             )
-
             st.success("Token created. Share this QR with the user.")
 
-            # -------- SEND OPTIONS --------
+            # ---- Send channels (optional) ----
             st.markdown("### Send QR")
             col1, col2 = st.columns(2)
-
             with col1:
                 with st.form("email_qr_form", clear_on_submit=True):
                     to_email = st.text_input("Recipient email")
@@ -292,7 +331,6 @@ with tab1:
                         filename=f"{token['user']}_{token['type']}_{token_id}.png"
                     )
                     (st.success if ok else st.error)(msg)
-
             with col2:
                 with st.form("wa_qr_form", clear_on_submit=True):
                     wa_number = st.text_input("WhatsApp number (E.164, e.g., +9198xxxxxxx)")
@@ -308,7 +346,7 @@ with tab1:
                         ok_send, msg_send = whatsapp_send_image(wa_number, media_id, caption=caption)
                         (st.success if ok_send else st.error)(msg_send)
 
-# ========== TAB 2: Validate / Use ==========
+# ---------- TAB 2: Validate / Use ----------
 with tab2:
     st.markdown("Scan a QR (or paste its text) to **consume a use** and update counts.")
     with st.form("scan_form", clear_on_submit=True):
@@ -354,7 +392,7 @@ with tab2:
                         except Exception as e:
                             st.error(f"Failed to update token: {e}")
 
-# ========== TAB 3: Tokens Dashboard ==========
+# ---------- TAB 3: Dashboard ----------
 with tab3:
     tokens = read_tokens()
     st.subheader("All Tokens")
