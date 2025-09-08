@@ -146,71 +146,6 @@ def within_validity(today_iso: str, start_iso: str, end_iso: str):
     except:
         return False
 
-# -----------------------------
-# Email & WhatsApp helpers (optional)
-# -----------------------------
-def send_email_with_png_via_sendgrid(to_email: str, subject: str, body_text: str, png_bytes: bytes, filename: str = "qr.png"):
-    key = st.secrets.get("email", {}).get("sendgrid_api_key", "")
-    from_email = st.secrets.get("email", {}).get("from_email", "")
-    if not key or not from_email:
-        return False, "Email not configured (need [email] sendgrid_api_key & from_email in Secrets)."
-    import base64
-    encoded = base64.b64encode(png_bytes).decode("utf-8")
-    payload = {
-        "personalizations": [{"to": [{"email": to_email}]}],
-        "from": {"email": from_email},
-        "subject": subject,
-        "content": [{"type": "text/plain", "value": body_text}],
-        "attachments": [{
-            "content": encoded,
-            "type": "image/png",
-            "filename": filename,
-            "disposition": "attachment"
-        }]
-    }
-    resp = requests.post(
-        "https://api.sendgrid.com/v3/mail/send",
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json=payload, timeout=30
-    )
-    if resp.status_code in (200, 202):
-        return True, "Email queued"
-    return False, f"SendGrid error {resp.status_code}: {resp.text}"
-
-def whatsapp_upload_media(png_bytes: bytes, filename: str = "qr.png"):
-    token = st.secrets.get("whatsapp", {}).get("token", "")
-    phone_number_id = st.secrets.get("whatsapp", {}).get("phone_number_id", "")
-    if not token or not phone_number_id:
-        return False, "WhatsApp not configured", None
-    files = {'file': (filename, png_bytes, 'image/png')}
-    data = {'messaging_product': 'whatsapp'}
-    url = f"https://graph.facebook.com/v20.0/{phone_number_id}/media"
-    resp = requests.post(url, headers={"Authorization": f"Bearer {token}"}, files=files, data=data, timeout=30)
-    if resp.status_code == 200:
-        media_id = resp.json().get("id")
-        return True, "Uploaded", media_id
-    return False, f"Upload error {resp.status_code}: {resp.text}", None
-
-def whatsapp_send_image(phone_e164: str, media_id: str, caption: str = ""):
-    token = st.secrets.get("whatsapp", {}).get("token", "")
-    phone_number_id = st.secrets.get("whatsapp", {}).get("phone_number_id", "")
-    if not token or not phone_number_id:
-        return False, "WhatsApp not configured"
-    url = f"https://graph.facebook.com/v20.0/{phone_number_id}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": phone_e164,
-        "type": "image",
-        "image": {"id": media_id, "caption": caption}
-    }
-    resp = requests.post(url, headers={
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }, json=payload, timeout=30)
-    if resp.status_code in (200, 201):
-        return True, "WhatsApp sent"
-    return False, f"Send error {resp.status_code}: {resp.text}"
-
 # =========================================================
 # SECTION 1: Latest entries (basic) + Add an entry (Sheet1)
 # =========================================================
@@ -253,7 +188,7 @@ if submitted:
 # SECTION 2: Tokens — Generate / Validate / Dashboard
 # =========================================================
 st.divider()
-tab1, tab2, tab3 = st.tabs(["➕ Generate QR (one per period)", "✅ Validate / Use", "📊 Tokens Dashboard"])
+tab1, tab2, tab3 = st.tabs(["➕ Generate QR", "✅ Validate / Use", "📊 Tokens Dashboard"])
 
 # ---------- TAB 1: Generate QR token ----------
 with tab1:
@@ -308,44 +243,6 @@ with tab1:
             )
             st.success("Token created. Share this QR with the user.")
 
-            # ---- Send channels (optional) ----
-            st.markdown("### Send QR")
-            col1, col2 = st.columns(2)
-            with col1:
-                with st.form("email_qr_form", clear_on_submit=True):
-                    to_email = st.text_input("Recipient email")
-                    email_btn = st.form_submit_button("Send Email")
-                if email_btn:
-                    ok, msg = send_email_with_png_via_sendgrid(
-                        to_email=to_email,
-                        subject=f"Meal Token QR — {token['user']} ({token['type']})",
-                        body_text=(
-                            f"Hello {token['user']},\n\n"
-                            f"Attached is your QR for {token['type']}.\n"
-                            f"Validity: {token['start']} → {token['end']}\n"
-                            f"Allowance: {token['allowance']}\n"
-                            f"Token ID: {token['id']}\n\n"
-                            f"Please keep it safe."
-                        ),
-                        png_bytes=png_bytes,
-                        filename=f"{token['user']}_{token['type']}_{token_id}.png"
-                    )
-                    (st.success if ok else st.error)(msg)
-            with col2:
-                with st.form("wa_qr_form", clear_on_submit=True):
-                    wa_number = st.text_input("WhatsApp number (E.164, e.g., +9198xxxxxxx)")
-                    wa_btn = st.form_submit_button("Send WhatsApp")
-                if wa_btn:
-                    ok_up, msg_up, media_id = whatsapp_upload_media(png_bytes, filename=f"{token['id']}.png")
-                    if not ok_up:
-                        st.error(msg_up)
-                    else:
-                        caption = (f"{token['user']} — {token['type']}\n"
-                                   f"Valid: {token['start']} → {token['end']}\n"
-                                   f"Allowance: {token['allowance']}  ID: {token['id']}")
-                        ok_send, msg_send = whatsapp_send_image(wa_number, media_id, caption=caption)
-                        (st.success if ok_send else st.error)(msg_send)
-
 # ---------- TAB 2: Validate / Use ----------
 with tab2:
     st.markdown("Scan a QR (or paste its text) to **consume a use** and update counts.")
@@ -357,7 +254,6 @@ with tab2:
     payload_from_camera = st.session_state.get("payload_from_camera", "")
 
     if use_camera:
-        # Imported inside block so the app still runs even if packages are missing
         from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
         import av
         import cv2
@@ -372,7 +268,6 @@ with tab2:
                 if data:
                     if "payload_from_camera" not in st.session_state or not st.session_state["payload_from_camera"]:
                         st.session_state["payload_from_camera"] = data
-                # draw polygon if detected
                 if points is not None:
                     pts = points.astype(int).reshape(-1, 2)
                     for i in range(len(pts)):
@@ -403,12 +298,12 @@ with tab2:
         else:
             parsed = parse_payload(scan_text.strip())
             if not parsed:
-                st.error("Invalid payload. Expecting MTK|id=...|user=...|type=...|allow=...|start=YYYY-MM-DD|end=YYYY-MM-DD")
+                st.error("Invalid payload.")
             else:
                 tokens = read_tokens()
                 token = next((t for t in tokens if t["id"] == parsed["id"]), None)
                 if not token:
-                    st.error("Token not found in 'tokens' sheet.")
+                    st.error("Token not found.")
                 else:
                     today_iso = date.today().isoformat()
                     valid = within_validity(today_iso, token["start"], token["end"])
@@ -432,7 +327,7 @@ with tab2:
                             update_token_used(token["id"], new_used, new_status)
                             append_use_row(datetime.now().isoformat(timespec="seconds"), token["id"], token["user"], note="scan")
                             st.success("Use recorded ✅")
-                            st.session_state["payload_from_camera"] = ""  # avoid double-submit
+                            st.session_state["payload_from_camera"] = ""
                         except Exception as e:
                             st.error(f"Failed to update token: {e}")
 
@@ -461,7 +356,7 @@ with tab3:
 **Issued:** {tok['issued_ts']}  
 """
         )
-        with st.expander("Show payload (encoded in the QR)"):
+        with st.expander("Show payload"):
             st.code(tok["payload"], language="text")
         c1, c2, c3 = st.columns(3)
         c1.metric("Allowance", tok["allowance"])
